@@ -48,6 +48,55 @@ func (s *RoleSuite) SetUpSuite(c *C) {
 	utils.InitLoggerForTests()
 }
 
+// TestMaxConcurrentSessions verifies that role sets correctly calculate
+// a user's MaxConcurrentSessions value from multiple roles with different
+// individual MaxConcurrentSessions values.
+func (s *RoleSuite) TestMaxConcurrentSessions(c *C) {
+	tts := []struct {
+		desc string
+		vals []int64
+		want int64
+	}{
+		{
+			desc: "smallest nonzero value is selected from mixed values",
+			vals: []int64{8, 6, 7, 5, 3, 0, 9},
+			want: 3,
+		},
+		{
+			desc: "smallest value selected from all nonzero values",
+			vals: []int64{5, 6, 7, 8},
+			want: 5,
+		},
+		{
+			desc: "all zero values results in a zero value",
+			vals: []int64{0, 0, 0, 0, 0, 0, 0},
+			want: 0,
+		},
+	}
+	for ti, tt := range tts {
+		cmt := Commentf("test case %d: %s", ti, tt.desc)
+		var set RoleSet
+		for i, val := range tt.vals {
+			role := &RoleV3{
+				Kind:    KindRole,
+				Version: V3,
+				Metadata: Metadata{
+					Name:      fmt.Sprintf("role-%d", i),
+					Namespace: defaults.Namespace,
+				},
+				Spec: RoleSpecV3{
+					Options: RoleOptions{
+						MaxConcurrentSessions: val,
+					},
+				},
+			}
+			c.Assert(role.CheckAndSetDefaults(), IsNil, cmt)
+			set = append(set, role)
+		}
+		c.Assert(set.MaxConcurrentSessions(), Equals, tt.want, cmt)
+	}
+}
+
 func (s *RoleSuite) TestRoleExtension(c *C) {
 	type Spec struct {
 		RoleSpecV2

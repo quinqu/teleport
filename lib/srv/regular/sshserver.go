@@ -551,6 +551,7 @@ func New(addr utils.NetAddr,
 		sshutils.AuthMethods{PublicKey: s.authHandlers.UserKeyAuth},
 		sshutils.SetLimiter(s.limiter),
 		sshutils.SetRequestHandler(s),
+		sshutils.SetNewConnHandler(s),
 		sshutils.SetCiphers(s.ciphers),
 		sshutils.SetKEXAlgorithms(s.kexAlgorithms),
 		sshutils.SetMACAlgorithms(s.macAlgorithms),
@@ -847,6 +848,68 @@ func (s *Server) HandleRequest(r *ssh.Request) {
 		}
 		log.Debugf("Discarding %q global request: %+v", r.Type, r)
 	}
+}
+
+// HandleNewConn is called by sshutils.Server once for each new incoming connection,
+// prior to handling any channels or requests.  Currently this callback's only
+// function is to apply concurrent session control limits.
+func (s *Server) HandleNewConn(ctx context.Context, ccx *sshutils.ConnectionContext) (context.Context, error) {
+	// we don't currently have any work to do in non-node contexts.
+	if s.Component() != teleport.ComponentNode {
+		return ctx, nil
+	}
+
+	identityContext, err := s.authHandlers.CreateIdentityContext(ccx.ServerConn)
+	if err != nil {
+		return ctx, trace.Wrap(err)
+	}
+
+	maxConcurrentSessions := identityContext.RoleSet.MaxConcurrentSessions()
+
+	if maxConcurrentSessions == 0 {
+		// concurrent session control is not active, nothing
+		// else needs to be done here.
+		return ctx, nil
+	}
+
+	cfg, err := s.authService.GetClusterConfig()
+	if err != nil {
+		return ctx, trace.Wrap(err)
+	}
+
+	lock, err := services.AcquireSemaphoreLock(ctx, services.SemaphoreLockConfig{
+		Service: s.authService,
+		Expiry:  cfg.GetSessionControlTimeout(),
+		Params: services.AcquireSemaphoreRequest{
+			SemaphoreKind: services.SemaphoreKindSessionControl,
+			SemaphoreName: identityContext.TeleportUser,
+			MaxLeases:     maxConcurrentSessions,
+			Holder:        s.uuid,
+		},
+	})
+	if err != nil {
+		if trace.IsLimitExceeded(err) {
+			// user has exceeded their max concurrent sessions.
+			s.EmitAuditEvent(events.SessionControlLimit, events.EventFields{
+				events.EventProtocol:   events.EventProtocolSSH,
+				events.EventUser:       identityContext.TeleportUser,
+				events.SessionServerID: s.uuid,
+			})
+		}
+		return ctx, trace.Wrap(err)
+	}
+	go lock.KeepAlive(ctx)
+	// ensure that losing the lock closes the connection context.  Under normal
+	// conditions, cancellation propagates from the connection context to the
+	// lock, but if we lose the lock due to some error (e.g. poor connectivity
+	// to auth server) then cancellation propagates in the other direction.
+	go func() {
+		// TODO(fspmarshall): If lock was lost due to error, find a way to propagate
+		// an error message to user.
+		<-lock.Done()
+		ccx.Close()
+	}()
+	return ctx, nil
 }
 
 // HandleNewChan is called when new channel is opened
