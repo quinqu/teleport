@@ -27,44 +27,38 @@ import (
 	"github.com/gravitational/teleport/lib/events/test"
 	"github.com/gravitational/teleport/lib/utils"
 
-	"gopkg.in/check.v1"
+	"github.com/stretchr/testify/assert"
 )
 
-type GCSStreamSuite struct {
-	handler *Handler
-	test.HandlerSuite
-}
-
-var _ = check.Suite(&GCSStreamSuite{})
-
-func (s *GCSStreamSuite) SetUpSuite(c *check.C) {
+// TestStreams tests various streaming upload scenarios
+func TestStreams(t *testing.T) {
 	utils.InitLoggerForTests(testing.Verbose())
 
-	config := Config{}
 	uri := os.Getenv(teleport.GCSTestURI)
 	if uri == "" {
-		c.Skip(
+		t.Skip(
 			fmt.Sprintf("Skipping GCS tests, set env var %q, details here: https://gravitational.com/teleport/docs/gcp_guide/",
 				teleport.GCSTestURI))
 	}
 	u, err := url.Parse(uri)
-	c.Assert(err, check.IsNil)
+	assert.Nil(t, err)
 
+	config := Config{}
 	err = config.SetFromURL(u)
-	c.Assert(err, check.IsNil)
+	assert.Nil(t, err)
 
-	s.handler, err = DefaultNewHandler(config)
-	c.Assert(err, check.IsNil)
+	handler, err := DefaultNewHandler(config)
+	assert.Nil(t, err)
+	defer handler.Close()
 
-	s.HandlerSuite.Handler = s.handler
-}
-
-func (s *GCSStreamSuite) TestStream(c *check.C) {
-	s.StreamManyParts(c)
-}
-
-func (s *GCSStreamSuite) TearDownSuite(c *check.C) {
-	if s.handler != nil {
-		s.handler.Close()
-	}
+	// Stream with handler and many parts
+	t.Run("StreamManyParts", func(t *testing.T) {
+		test.StreamManyParts(t, handler)
+	})
+	t.Run("UploadDownload", func(t *testing.T) {
+		test.UploadDownload(t, handler)
+	})
+	t.Run("DownloadNotFound", func(t *testing.T) {
+		test.DownloadNotFound(t, handler)
+	})
 }

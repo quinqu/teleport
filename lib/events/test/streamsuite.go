@@ -2,14 +2,14 @@ package test
 
 import (
 	"context"
+	"io/ioutil"
 	"os"
-	"path/filepath"
+	"testing"
 
 	"github.com/gravitational/teleport/lib/events"
-	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/session"
 
-	"gopkg.in/check.v1"
+	"github.com/stretchr/testify/assert"
 )
 
 // StreamParams configures parameters of a stream test suite
@@ -23,16 +23,16 @@ type StreamParams struct {
 }
 
 // StreamSinglePart tests stream upload and subsequent download and reads the results
-func (s *HandlerSuite) StreamSinglePart(c *check.C) {
-	s.StreamWithParameters(c, StreamParams{
+func StreamSinglePart(t *testing.T, handler events.MultipartHandler) {
+	StreamWithParameters(t, handler, StreamParams{
 		PrintEvents:    1024,
 		MinUploadBytes: 1024 * 1024,
 	})
 }
 
 // Stream tests stream upload and subsequent download and reads the results
-func (s *HandlerSuite) Stream(c *check.C) {
-	s.StreamWithParameters(c, StreamParams{
+func Stream(t *testing.T, handler events.MultipartHandler) {
+	StreamWithParameters(t, handler, StreamParams{
 		PrintEvents:       1024,
 		MinUploadBytes:    1024,
 		ConcurrentUploads: 2,
@@ -40,8 +40,8 @@ func (s *HandlerSuite) Stream(c *check.C) {
 }
 
 // StreamManyParts tests stream upload and subsequent download and reads the results
-func (s *HandlerSuite) StreamManyParts(c *check.C) {
-	s.StreamWithParameters(c, StreamParams{
+func StreamManyParts(t *testing.T, handler events.MultipartHandler) {
+	StreamWithParameters(t, handler, StreamParams{
 		PrintEvents:       8192,
 		MinUploadBytes:    1024,
 		ConcurrentUploads: 64,
@@ -49,49 +49,49 @@ func (s *HandlerSuite) StreamManyParts(c *check.C) {
 }
 
 // StreamWithParameters tests stream upload and subsequent download and reads the results
-func (s *HandlerSuite) StreamWithParameters(c *check.C, params StreamParams) {
+func StreamWithParameters(t *testing.T, handler events.MultipartHandler, params StreamParams) {
 	ctx := context.TODO()
 
 	inEvents := events.GenerateSession(params.PrintEvents)
 	sid := session.ID(inEvents[0].(events.SessionMetadataGetter).GetSessionID())
 
 	streamer, err := events.NewProtoStreamer(events.ProtoStreamerConfig{
-		Uploader:          s.Handler,
+		Uploader:          handler,
 		MinUploadBytes:    params.MinUploadBytes,
 		ConcurrentUploads: params.ConcurrentUploads,
 	})
-	c.Assert(err, check.IsNil)
+	assert.Nil(t, err)
 
 	stream, err := streamer.CreateAuditStream(ctx, sid)
-	c.Assert(err, check.IsNil)
+	assert.Nil(t, err)
 
 	for _, event := range inEvents {
 		err := stream.EmitAuditEvent(ctx, event)
-		c.Assert(err, check.IsNil)
+		assert.Nil(t, err)
 	}
 
 	err = stream.Complete(ctx)
-	c.Assert(err, check.IsNil)
+	assert.Nil(t, err)
 
-	dir := c.MkDir()
-	f, err := os.Create(filepath.Join(dir, string(sid)))
-	c.Assert(err, check.IsNil)
+	f, err := ioutil.TempFile("", string(sid))
+	assert.Nil(t, err)
+	defer os.Remove(f.Name())
 	defer f.Close()
 
-	err = s.Handler.Download(ctx, sid, f)
-	c.Assert(err, check.IsNil)
+	err = handler.Download(ctx, sid, f)
+	assert.Nil(t, err)
 
 	_, err = f.Seek(0, 0)
-	c.Assert(err, check.IsNil)
+	assert.Nil(t, err)
 
 	reader := events.NewProtoReader(f)
 	out, err := reader.ReadAll(ctx)
-	c.Assert(err, check.IsNil)
+	assert.Nil(t, err)
 
 	stats := reader.GetStats()
-	c.Assert(stats.SkippedEvents, check.Equals, int64(0))
-	c.Assert(stats.OutOfOrderEvents, check.Equals, int64(0))
-	c.Assert(stats.TotalEvents, check.Equals, int64(len(inEvents)))
+	assert.Equal(t, stats.SkippedEvents, int64(0))
+	assert.Equal(t, stats.OutOfOrderEvents, int64(0))
+	assert.Equal(t, stats.TotalEvents, int64(len(inEvents)))
 
-	fixtures.DeepCompareSlices(c, inEvents, out)
+	assert.Equal(t, inEvents, out)
 }

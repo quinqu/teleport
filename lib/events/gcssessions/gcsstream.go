@@ -18,6 +18,8 @@ package gcssessions
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -81,9 +83,6 @@ func (h *Handler) UploadPart(ctx context.Context, upload events.StreamUpload, pa
 	}
 
 	partPath := h.partPath(upload, partNumber)
-
-	h.Logger.Debugf("Creating upload part %q", partPath)
-
 	writer := h.gcsClient.Bucket(h.Config.Bucket).Object(partPath).NewWriter(ctx)
 	start := time.Now()
 	_, err := io.Copy(writer, partBody)
@@ -115,30 +114,28 @@ func (h *Handler) CompleteUpload(ctx context.Context, upload events.StreamUpload
 	for len(objects) > maxParts {
 		h.Logger.Debugf("Got %v objects for upload %v, performing temp merge.", len(objects), upload)
 		objectsToMerge := objects[:maxParts]
-		mergeID := uuid.New()
+		mergeID := hashOfNames(objectsToMerge)
 		mergePath := h.mergePath(upload, mergeID)
 		mergeObject := bucket.Object(mergePath)
 		composer := mergeObject.ComposerFrom(objectsToMerge...)
-		_, err = composer.Run(ctx)
+		_, err = h.OnComposerRun(ctx, composer)
 		if err != nil {
 			return convertGCSError(err)
 		}
 		objects = append([]*storage.ObjectHandle{mergeObject}, objects[maxParts:]...)
 	}
-	h.Logger.Debugf("Got %v objects for upload %v, performing final merge.", len(objects), upload)
 	sessionPath := h.path(upload.SessionID)
 	composer := bucket.Object(sessionPath).ComposerFrom(objects...)
-	_, err = composer.Run(ctx)
+	_, err = h.OnComposerRun(ctx, composer)
 	if err != nil {
 		return convertGCSError(err)
 	}
-
-	h.Logger.Debugf("Composed object %v: %v.", composer, err)
+	h.Logger.Debugf("Got %v objects for upload %v, performed merge.", len(objects), upload)
 	return h.cleanupUpload(ctx, upload)
 }
 
 // cleanupUpload iterates through all upload related objects
-// and deletes them
+// and deletes them in parallel
 func (h *Handler) cleanupUpload(ctx context.Context, upload events.StreamUpload) error {
 	prefixes := []string{
 		h.partsPrefix(upload),
@@ -147,9 +144,9 @@ func (h *Handler) cleanupUpload(ctx context.Context, upload events.StreamUpload)
 	}
 
 	bucket := h.gcsClient.Bucket(h.Config.Bucket)
+	var objects []*storage.ObjectHandle
 	for _, prefix := range prefixes {
 		i := bucket.Objects(ctx, &storage.Query{Prefix: prefix, Versions: false})
-	innerloop:
 		for {
 			attrs, err := i.Next()
 			if err == iterator.Done {
@@ -158,17 +155,42 @@ func (h *Handler) cleanupUpload(ctx context.Context, upload events.StreamUpload)
 			if err != nil {
 				return convertGCSError(err)
 			}
-			err = bucket.Object(attrs.Name).Delete(ctx)
-			err = convertGCSError(err)
-			if err != nil {
-				if trace.IsNotFound(err) {
-					continue innerloop
-				}
-				return trace.Wrap(err)
-			}
+			objects = append(objects, bucket.Object(attrs.Name))
 		}
 	}
-	return nil
+
+	// batch delete objects to speed up the process
+	semCh := make(chan struct{}, maxParts)
+	errorsCh := make(chan error, maxParts)
+	for i := range objects {
+		select {
+		case semCh <- struct{}{}:
+			go func(object *storage.ObjectHandle) {
+				defer func() { <-semCh }()
+				err := h.OnObjectDelete(ctx, object)
+				select {
+				case errorsCh <- convertGCSError(err):
+				case <-ctx.Done():
+				}
+			}(objects[i])
+		case <-ctx.Done():
+			return trace.ConnectionProblem(ctx.Err(), "context closed")
+		}
+	}
+
+	var errors []error
+	for range objects {
+		select {
+		case err := <-errorsCh:
+			if !trace.IsNotFound(err) {
+				errors = append(errors)
+			}
+		case <-ctx.Done():
+			return trace.ConnectionProblem(ctx.Err(), "context closed")
+		}
+	}
+
+	return trace.NewAggregate(errors...)
 }
 
 func (h *Handler) partsToObjects(upload events.StreamUpload, parts []events.StreamPart) []*storage.ObjectHandle {
@@ -247,6 +269,8 @@ const (
 	// mergesKey is a key that holds temp merges to workaround
 	// google max parts limit
 	mergesKey = "merges"
+	// completedKey is a key that holds all completed uploads
+	completedKey = "completed"
 	// partExt is a part extension
 	partExt = ".part"
 	// mergeExt is a merge extension
@@ -275,6 +299,21 @@ func (h *Handler) uploadPath(upload events.StreamUpload) string {
 	return filepath.Join(h.uploadPrefix(upload), string(upload.SessionID)) + uploadExt
 }
 
+// completedUploadsPrefix is "path/completed"
+func (h *Handler) completedUploadsPrefix() string {
+	return strings.TrimPrefix(filepath.Join(h.Path, uploadsKey), slash)
+}
+
+// completedUploadPrefix is "path/completed/<upload-id>"
+func (h *Handler) completedUploadPrefix(upload events.StreamUpload) string {
+	return filepath.Join(h.uploadsPrefix(), upload.ID)
+}
+
+// completedUploadPath is "path/completed/<upload-id>/<session-id>.upload"
+func (h *Handler) completedUploadPath(upload events.StreamUpload) string {
+	return filepath.Join(h.uploadPrefix(upload), string(upload.SessionID)) + uploadExt
+}
+
 // partsPrefix is "path/parts/<upload-id>"
 // this path is under different tree from upload to make prefix
 // iteration of uploads more efficient (that otherwise would have
@@ -299,6 +338,16 @@ func (h *Handler) mergesPrefix(upload events.StreamUpload) string {
 // mergePath is "path/merges/<upload-id>/<merge-id>.merge"
 func (h *Handler) mergePath(upload events.StreamUpload, mergeID string) string {
 	return filepath.Join(h.mergesPrefix(upload), fmt.Sprintf("%v%v", mergeID, mergeExt))
+}
+
+// hashOfNames creates an object with hash of names
+// to avoid generating new objects for consecutive merge attempts
+func hashOfNames(objects []*storage.ObjectHandle) string {
+	hash := sha256.New()
+	for _, object := range objects {
+		hash.Write([]byte(object.ObjectName()))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func uploadFromPath(path string) (*events.StreamUpload, error) {

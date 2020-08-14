@@ -21,15 +21,15 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"testing"
 
-	"gopkg.in/check.v1"
-
-	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/session"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // TestProtoStreamer tests edge cases of proto streamer implementation
-func (a *EventsTestSuite) TestProtoStreamer(c *check.C) {
+func TestProtoStreamer(t *testing.T) {
 	type generateEventsFn func() []AuditEvent
 	type testCase struct {
 		name           string
@@ -67,45 +67,46 @@ func (a *EventsTestSuite) TestProtoStreamer(c *check.C) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 
-testcases:
 	for i, tc := range testCases {
-		uploader := NewMemoryUploader()
-		streamer, err := NewProtoStreamer(ProtoStreamerConfig{
-			Uploader:       uploader,
-			MinUploadBytes: tc.minUploadBytes,
-		})
-		c.Assert(err, check.IsNil)
+		t.Run(tc.name, func(t *testing.T) {
+			uploader := NewMemoryUploader()
+			streamer, err := NewProtoStreamer(ProtoStreamerConfig{
+				Uploader:       uploader,
+				MinUploadBytes: tc.minUploadBytes,
+			})
+			assert.Nil(t, err)
 
-		sid := session.ID(fmt.Sprintf("test-%v", i))
-		stream, err := streamer.CreateAuditStream(ctx, sid)
-		c.Assert(err, check.IsNil)
+			sid := session.ID(fmt.Sprintf("test-%v", i))
+			stream, err := streamer.CreateAuditStream(ctx, sid)
+			assert.Nil(t, err)
 
-		events := tc.events
-		for _, event := range events {
-			err := stream.EmitAuditEvent(ctx, event)
-			if tc.err != nil {
-				c.Assert(err, check.FitsTypeOf, tc.err)
-				continue testcases
-			} else {
-				c.Assert(err, check.IsNil)
+			events := tc.events
+			for _, event := range events {
+				err := stream.EmitAuditEvent(ctx, event)
+				if tc.err != nil {
+					assert.IsType(t, tc.err, err)
+					return
+				}
+				assert.Nil(t, err)
 			}
-		}
-		err = stream.Complete(ctx)
-		c.Assert(err, check.IsNil)
+			err = stream.Complete(ctx)
+			assert.Nil(t, err)
 
-		var outEvents []AuditEvent
-		uploads, err := uploader.ListUploads(ctx)
-		c.Assert(err, check.IsNil)
-		parts, err := uploader.GetParts(uploads[0].ID)
-		c.Assert(err, check.IsNil)
+			var outEvents []AuditEvent
+			uploads, err := uploader.ListUploads(ctx)
+			assert.Nil(t, err)
+			parts, err := uploader.GetParts(uploads[0].ID)
+			assert.Nil(t, err)
 
-		for _, part := range parts {
-			reader := NewProtoReader(bytes.NewReader(part))
-			out, err := reader.ReadAll(ctx)
-			c.Assert(err, check.IsNil, check.Commentf("part crash %#v", part))
-			outEvents = append(outEvents, out...)
-		}
-		fixtures.DeepCompareSlices(c, events, outEvents)
+			for _, part := range parts {
+				reader := NewProtoReader(bytes.NewReader(part))
+				out, err := reader.ReadAll(ctx)
+				assert.Nil(t, err, "part crash %#v", part)
+				outEvents = append(outEvents, out...)
+			}
+
+			assert.Equal(t, events, outEvents)
+		})
 	}
 }
 

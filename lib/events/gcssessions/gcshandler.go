@@ -105,6 +105,12 @@ type Config struct {
 	KMSKeyName string
 	// Endpoint
 	Endpoint string
+	// OnComposerRun is used for fault injection in tests
+	// runs (or not runs composer and returns error
+	OnComposerRun func(ctx context.Context, composer *storage.Composer) (*storage.ObjectAttrs, error)
+	// OnObjectDelete is used for fault injection in tests
+	// runs (or not runs object delete) and returns error
+	OnObjectDelete func(ctx context.Context, object *storage.ObjectHandle) error
 }
 
 // SetFromURL sets values on the Config from the supplied URI
@@ -134,17 +140,36 @@ func (cfg *Config) SetFromURL(url *url.URL) error {
 	if projectIDParamString == "" {
 		return trace.BadParameter("parameter %s with value '%s' is invalid",
 			projectID, projectIDParamString)
-	} else {
-		cfg.ProjectID = projectIDParamString
 	}
+	cfg.ProjectID = projectIDParamString
 
 	if url.Host == "" {
 		return trace.BadParameter("host should be set to the bucket name for recording storage")
-	} else {
-		cfg.Bucket = url.Host
 	}
+	cfg.Bucket = url.Host
 
 	return nil
+}
+
+// CheckAndSetDefaults checks and set default values
+func (cfg *Config) CheckAndSetDefaults() error {
+	if cfg.OnComposerRun == nil {
+		cfg.OnComposerRun = composerRun
+	}
+	if cfg.OnObjectDelete == nil {
+		cfg.OnObjectDelete = objectDelete
+	}
+	return nil
+}
+
+// objectDelete is a passthrough function to delete an object
+func objectDelete(ctx context.Context, object *storage.ObjectHandle) error {
+	return object.Delete(ctx)
+}
+
+// ComposerRun is a passthrough function that runs composer
+func composerRun(ctx context.Context, composer *storage.Composer) (*storage.ObjectAttrs, error) {
+	return composer.Run(ctx)
 }
 
 // DefaultNewHandler returns a new handler with default GCS client settings derived from the config
@@ -168,6 +193,9 @@ func DefaultNewHandler(cfg Config) (*Handler, error) {
 
 // NewHandler returns a new handler with specific context, cancelFunc, and client
 func NewHandler(ctx context.Context, cancelFunc context.CancelFunc, cfg Config, client *storage.Client) (*Handler, error) {
+	if err := cfg.CheckAndSetDefaults(); err != nil {
+		return nil, trace.Wrap(err)
+	}
 	h := &Handler{
 		Entry: log.WithFields(log.Fields{
 			trace.Component: teleport.Component(teleport.SchemeGCS),
@@ -200,7 +228,7 @@ type Handler struct {
 	clientCancel context.CancelFunc
 }
 
-// Closer releases connection and resources associated with log if any
+// Close releases connection and resources associated with log if any
 func (h *Handler) Close() error {
 	h.clientCancel()
 	return h.gcsClient.Close()

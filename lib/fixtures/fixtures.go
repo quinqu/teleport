@@ -3,6 +3,7 @@ package fixtures
 import (
 	"reflect"
 	"runtime/debug"
+	"testing"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/gravitational/trace"
@@ -38,6 +39,48 @@ func ExpectAlreadyExists(c *check.C, err error) {
 // ExpectConnectionProblem expects connection problem error
 func ExpectConnectionProblem(c *check.C, err error) {
 	c.Assert(trace.IsConnectionProblem(err), check.Equals, true, check.Commentf("expected ConnectionProblem, got %T %v at %v", trace.Unwrap(err), err, string(debug.Stack())))
+}
+
+// AssertNotFound expects not found error
+func AssertNotFound(t *testing.T, err error) {
+	if trace.IsNotFound(err) == false {
+		t.Fatalf("Expected NotFound, got %T %v at %v.", trace.Unwrap(err), err, string(debug.Stack()))
+	}
+}
+
+// AssertBadParameter expects bad parameter error
+func AssertBadParameter(t *testing.T, err error) {
+	if trace.IsBadParameter(err) == false {
+		t.Fatalf("Expected BadParameter, got %T %v at %v.", trace.Unwrap(err), err, string(debug.Stack()))
+	}
+}
+
+// AssertCompareFailed expects compare failed error
+func AssertCompareFailed(t *testing.T, err error) {
+	if trace.IsCompareFailed(err) == false {
+		t.Fatalf("Expected CompareFailed, got %T %v at %v.", trace.Unwrap(err), err, string(debug.Stack()))
+	}
+}
+
+// AssertAccessDenied expects error to be access denied
+func AssertAccessDenied(t *testing.T, err error) {
+	if trace.IsAccessDenied(err) == false {
+		t.Fatalf("Expected AccessDenied, got %T %v at %v.", trace.Unwrap(err), err, string(debug.Stack()))
+	}
+}
+
+// AssertAlreadyExists expects already exists error
+func AssertAlreadyExists(t *testing.T, err error) {
+	if trace.IsAlreadyExists(err) == false {
+		t.Fatalf("Expected AlreadyExists, got %T %v at %v.", trace.Unwrap(err), err, string(debug.Stack()))
+	}
+}
+
+// AssertConnectionProblem expects connection problem error
+func AssertConnectionProblem(t *testing.T, err error) {
+	if trace.IsConnectionProblem(err) == false {
+		t.Fatalf("Expected ConnectionProblem, got %T %v at %v.", trace.Unwrap(err), err, string(debug.Stack()))
+	}
 }
 
 // DeepCompare uses gocheck DeepEquals but provides nice diff if things are not equal

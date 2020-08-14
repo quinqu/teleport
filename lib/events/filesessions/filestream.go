@@ -79,7 +79,7 @@ func (h *Handler) CreateUpload(ctx context.Context, sessionID session.ID) (*even
 func (h *Handler) UploadPart(ctx context.Context, upload events.StreamUpload, partNumber int64, partBody io.ReadSeeker) (*events.StreamPart, error) {
 	start := time.Now()
 	defer func() {
-		h.Infof("UploadPart(%v) part(%v) uploaded in %v.", upload.ID, partNumber, time.Since(start))
+		h.Debugf("UploadPart(%v) part(%v) uploaded in %v.", upload.ID, partNumber, time.Since(start))
 	}()
 
 	if err := checkUpload(upload); err != nil {

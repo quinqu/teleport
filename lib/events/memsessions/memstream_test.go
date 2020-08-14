@@ -23,23 +23,20 @@ import (
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/events/test"
 	"github.com/gravitational/teleport/lib/utils"
-
-	"gopkg.in/check.v1"
 )
 
-func TestGCS(t *testing.T) { check.TestingT(t) }
-
-type MemSuite struct {
-	test.HandlerSuite
-}
-
-var _ = check.Suite(&MemSuite{})
-
-func (s *MemSuite) SetUpSuite(c *check.C) {
+// TestStreams tests various streaming upload scenarios
+func TestStreams(t *testing.T) {
 	utils.InitLoggerForTests(testing.Verbose())
-	s.HandlerSuite.Handler = events.NewMemoryUploader()
-}
 
-func (s *MemSuite) TestStream(c *check.C) {
-	s.StreamManyParts(c)
+	// Stream with handler and many parts
+	t.Run("StreamManyParts", func(t *testing.T) {
+		test.StreamManyParts(t, events.NewMemoryUploader())
+	})
+	t.Run("UploadDownload", func(t *testing.T) {
+		test.UploadDownload(t, events.NewMemoryUploader())
+	})
+	t.Run("DownloadNotFound", func(t *testing.T) {
+		test.DownloadNotFound(t, events.NewMemoryUploader())
+	})
 }
