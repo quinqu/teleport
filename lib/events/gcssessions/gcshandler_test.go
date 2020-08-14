@@ -39,13 +39,12 @@ type GCSSuite struct {
 var _ = check.Suite(&GCSSuite{})
 
 func (s *GCSSuite) SetUpSuite(c *check.C) {
-
 	server := *fakestorage.NewServer([]fakestorage.Object{})
 	s.gcsServer = &server
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
-	utils.InitLoggerForTests()
+	utils.InitLoggerForTests(testing.Verbose())
 
 	var err error
 	s.HandlerSuite.Handler, err = NewHandler(ctx, cancelFunc, Config{

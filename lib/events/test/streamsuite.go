@@ -4,8 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/fixtures"
@@ -14,20 +12,59 @@ import (
 	"gopkg.in/check.v1"
 )
 
+// StreamParams configures parameters of a stream test suite
+type StreamParams struct {
+	// PrintEvents is amount of print events to generate
+	PrintEvents int64
+	// ConcurrentUploads is amount of concurrent uploads
+	ConcurrentUploads int
+	// MinUploadBytes is minimum required upload bytes
+	MinUploadBytes int64
+}
+
+// StreamSinglePart tests stream upload and subsequent download and reads the results
+func (s *HandlerSuite) StreamSinglePart(c *check.C) {
+	s.StreamWithParameters(c, StreamParams{
+		PrintEvents:    1024,
+		MinUploadBytes: 1024 * 1024,
+	})
+}
+
 // Stream tests stream upload and subsequent download and reads the results
 func (s *HandlerSuite) Stream(c *check.C) {
+	s.StreamWithParameters(c, StreamParams{
+		PrintEvents:       1024,
+		MinUploadBytes:    1024,
+		ConcurrentUploads: 2,
+	})
+}
+
+// StreamManyParts tests stream upload and subsequent download and reads the results
+func (s *HandlerSuite) StreamManyParts(c *check.C) {
+	s.StreamWithParameters(c, StreamParams{
+		PrintEvents:       8192,
+		MinUploadBytes:    1024,
+		ConcurrentUploads: 64,
+	})
+}
+
+// StreamWithParameters tests stream upload and subsequent download and reads the results
+func (s *HandlerSuite) StreamWithParameters(c *check.C, params StreamParams) {
 	ctx := context.TODO()
-	id := session.NewID()
+
+	inEvents := events.GenerateSession(params.PrintEvents)
+	sid := session.ID(inEvents[0].(events.SessionMetadataGetter).GetSessionID())
 
 	streamer, err := events.NewProtoStreamer(events.ProtoStreamerConfig{
-		Uploader: s.Handler,
+		Uploader:          s.Handler,
+		MinUploadBytes:    params.MinUploadBytes,
+		ConcurrentUploads: params.ConcurrentUploads,
 	})
 	c.Assert(err, check.IsNil)
 
-	stream, err := streamer.CreateAuditStream(ctx, id)
+	stream, err := streamer.CreateAuditStream(ctx, sid)
 	c.Assert(err, check.IsNil)
 
-	inEvents := []events.AuditEvent{&SessionStart, &SessionPrint, &SessionEnd}
 	for _, event := range inEvents {
 		err := stream.EmitAuditEvent(ctx, event)
 		c.Assert(err, check.IsNil)
@@ -37,11 +74,11 @@ func (s *HandlerSuite) Stream(c *check.C) {
 	c.Assert(err, check.IsNil)
 
 	dir := c.MkDir()
-	f, err := os.Create(filepath.Join(dir, string(id)))
+	f, err := os.Create(filepath.Join(dir, string(sid)))
 	c.Assert(err, check.IsNil)
 	defer f.Close()
 
-	err = s.Handler.Download(context.TODO(), id, f)
+	err = s.Handler.Download(ctx, sid, f)
 	c.Assert(err, check.IsNil)
 
 	_, err = f.Seek(0, 0)
@@ -51,86 +88,10 @@ func (s *HandlerSuite) Stream(c *check.C) {
 	out, err := reader.ReadAll(ctx)
 	c.Assert(err, check.IsNil)
 
+	stats := reader.GetStats()
+	c.Assert(stats.SkippedEvents, check.Equals, int64(0))
+	c.Assert(stats.OutOfOrderEvents, check.Equals, int64(0))
+	c.Assert(stats.TotalEvents, check.Equals, int64(len(inEvents)))
+
 	fixtures.DeepCompareSlices(c, inEvents, out)
 }
-
-func max(vars ...int) int {
-	m := vars[0]
-	for _, zz := range vars {
-		if zz > m {
-			m = zz
-		}
-	}
-	return m
-}
-
-var (
-	// SessionStart is a session start event
-	SessionStart = events.SessionStart{
-		Metadata: events.Metadata{
-			Index: 0,
-			Type:  events.SessionStartEvent,
-			ID:    "36cee9e9-9a80-4c32-9163-3d9241cdac7a",
-			Code:  events.SessionStartCode,
-			Time:  time.Date(2020, 03, 30, 15, 58, 54, 561*int(time.Millisecond), time.UTC),
-		},
-		ServerMetadata: events.ServerMetadata{
-			ServerID: "a7c54b0c-469c-431e-af4d-418cd3ae9694",
-			ServerLabels: map[string]string{
-				"kernel": "5.3.0-42-generic",
-				"date":   "Mon Mar 30 08:58:54 PDT 2020",
-				"group":  "gravitational/devc",
-			},
-			ServerHostname:  "planet",
-			ServerNamespace: "default",
-		},
-		SessionMetadata: events.SessionMetadata{
-			SessionID: "5b3555dc-729f-11ea-b66a-507b9dd95841",
-		},
-		UserMetadata: events.UserMetadata{
-			User:  "bob@example.com",
-			Login: "bob",
-		},
-		ConnectionMetadata: events.ConnectionMetadata{
-			LocalAddr:  "127.0.0.1:3022",
-			RemoteAddr: "[::1]:37718",
-		},
-		TerminalSize: "80:25",
-	}
-	// SessionPrint is a session print event
-	SessionPrint = events.SessionPrint{
-		Metadata: events.Metadata{
-			Index: 11,
-			Type:  events.SessionPrintEvent,
-			Time:  time.Date(2020, 03, 30, 15, 58, 56, 959*int(time.Millisecond), time.UTC),
-		},
-		ChunkIndex:        9,
-		Bytes:             1551,
-		Data:              []byte(strings.Repeat("c", 1551)),
-		DelayMilliseconds: 2284,
-		Offset:            1957,
-	}
-	// SessionEnd is a session end event
-	SessionEnd = events.SessionEnd{
-		Metadata: events.Metadata{
-			Index: 20,
-			Type:  events.SessionEndEvent,
-			ID:    "da455e0f-c27d-459f-a218-4e83b3db9426",
-			Code:  events.SessionEndCode,
-			Time:  time.Date(2020, 03, 30, 15, 58, 58, 999*int(time.Millisecond), time.UTC),
-		},
-		ServerMetadata: events.ServerMetadata{
-			ServerID:        "a7c54b0c-469c-431e-af4d-418cd3ae9694",
-			ServerNamespace: "default",
-		},
-		SessionMetadata: events.SessionMetadata{
-			SessionID: "5b3555dc-729f-11ea-b66a-507b9dd95841",
-		},
-		UserMetadata: events.UserMetadata{
-			User: "alice@example.com",
-		},
-		EnhancedRecording: true,
-		Interactive:       true,
-		Participants:      []string{"alice@example.com"},
-	}
-)

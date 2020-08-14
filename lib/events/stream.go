@@ -81,6 +81,8 @@ type ProtoStreamerConfig struct {
 	// MinUploadBytes submits upload when they have reached min bytes (could be more,
 	// but not less), due to the nature of gzip writer
 	MinUploadBytes int64
+	// ConcurrentUploads sets concurrent uploads per stream
+	ConcurrentUploads int
 }
 
 // CheckAndSetDefaults checks and sets streamer defaults
@@ -90,6 +92,9 @@ func (cfg *ProtoStreamerConfig) CheckAndSetDefaults() error {
 	}
 	if cfg.MinUploadBytes == 0 {
 		cfg.MinUploadBytes = MinUploadPartSizeBytes
+	}
+	if cfg.ConcurrentUploads == 0 {
+		cfg.ConcurrentUploads = defaults.ConcurrentUploadsPerStream
 	}
 	return nil
 }
@@ -127,11 +132,12 @@ func (s *ProtoStreamer) CreateAuditStream(ctx context.Context, sid session.ID) (
 	}
 
 	return NewProtoStream(ProtoStreamConfig{
-		Upload:         *upload,
-		BufferPool:     s.bufferPool,
-		SlicePool:      s.slicePool,
-		Uploader:       s.cfg.Uploader,
-		MinUploadBytes: s.cfg.MinUploadBytes,
+		Upload:            *upload,
+		BufferPool:        s.bufferPool,
+		SlicePool:         s.slicePool,
+		Uploader:          s.cfg.Uploader,
+		MinUploadBytes:    s.cfg.MinUploadBytes,
+		ConcurrentUploads: s.cfg.ConcurrentUploads,
 	})
 }
 
@@ -175,6 +181,8 @@ type ProtoStreamConfig struct {
 	InactivityFlushPeriod time.Duration
 	// Clock is used to override time in tests
 	Clock clockwork.Clock
+	// ConcurrentUploads sets concurrent uploads per stream
+	ConcurrentUploads int
 }
 
 // CheckAndSetDefaults checks and sets default values
@@ -196,6 +204,9 @@ func (cfg *ProtoStreamConfig) CheckAndSetDefaults() error {
 	}
 	if cfg.InactivityFlushPeriod == 0 {
 		cfg.InactivityFlushPeriod = defaults.InactivityFlushPeriod
+	}
+	if cfg.ConcurrentUploads == 0 {
+		cfg.ConcurrentUploads = defaults.ConcurrentUploadsPerStream
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clockwork.NewRealClock()
@@ -221,6 +232,7 @@ func NewProtoStream(cfg ProtoStreamConfig) (*ProtoStream, error) {
 
 		completeCtx: completeCtx,
 		complete:    complete,
+		completeMtx: &sync.RWMutex{},
 
 		uploadsCtx:  uploadsCtx,
 		uploadsDone: uploadsDone,
@@ -231,8 +243,8 @@ func NewProtoStream(cfg ProtoStreamConfig) (*ProtoStream, error) {
 	writer := &sliceWriter{
 		proto:             stream,
 		activeUploads:     make(map[int64]*activeUpload),
-		completedUploadsC: make(chan *activeUpload, 1),
-		semUploads:        make(chan struct{}, 1),
+		completedUploadsC: make(chan *activeUpload, cfg.ConcurrentUploads),
+		semUploads:        make(chan struct{}, cfg.ConcurrentUploads),
 		lastPartNumber:    0,
 	}
 	if len(cfg.CompletedParts) > 0 {
@@ -274,9 +286,11 @@ type ProtoStream struct {
 	cancel    context.CancelFunc
 
 	// completeCtx is used to signal completion of the operation
-	completeCtx  context.Context
-	complete     context.CancelFunc
-	completeType int32
+	completeCtx    context.Context
+	complete       context.CancelFunc
+	completeType   int32
+	completeResult error
+	completeMtx    *sync.RWMutex
 
 	// uploadsCtx is used to signal that all uploads have been completed
 	uploadsCtx context.Context
@@ -299,6 +313,18 @@ const (
 type protoEvent struct {
 	index int64
 	oneof *OneOf
+}
+
+func (s *ProtoStream) setCompleteResult(err error) {
+	s.completeMtx.Lock()
+	defer s.completeMtx.Unlock()
+	s.completeResult = err
+}
+
+func (s *ProtoStream) getCompleteResult() error {
+	s.completeMtx.RLock()
+	defer s.completeMtx.RUnlock()
+	return s.completeResult
 }
 
 // Done returns channel closed when streamer is closed
@@ -324,7 +350,7 @@ func (s *ProtoStream) EmitAuditEvent(ctx context.Context, event AuditEvent) erro
 	case s.eventsCh <- protoEvent{index: event.GetIndex(), oneof: oneof}:
 		diff := time.Since(start)
 		if diff > 100*time.Millisecond {
-			log.Debugf("[SLOW] EmitAuditDevnt took %v.", diff)
+			log.Debugf("[SLOW] EmitAuditEvent took %v.", diff)
 		}
 		return nil
 	case <-s.cancelCtx.Done():
@@ -343,7 +369,7 @@ func (s *ProtoStream) Complete(ctx context.Context) error {
 	// wait for all in-flight uploads to complete and stream to be completed
 	case <-s.uploadsCtx.Done():
 		s.cancel()
-		return nil
+		return s.getCompleteResult()
 	case <-ctx.Done():
 		return trace.ConnectionProblem(ctx.Err(), "context has cancelled before complete could succeed")
 	}
@@ -467,8 +493,8 @@ func (w *sliceWriter) receiveAndUpload() {
 				inactivityPeriod = 0
 			}
 			if inactivityPeriod >= w.proto.cfg.InactivityFlushPeriod {
-				// inactivity period exceeded threshold, means
-				// that there is no need to schedule a timer until next
+				// inactivity period exceeded threshold,
+				// there is no need to schedule a timer until the next
 				// event occurs, set the timer channel to nil
 				flushCh = nil
 				if w.current != nil {
@@ -569,7 +595,12 @@ func (w *sliceWriter) completeStream() {
 		}
 	}
 	if atomic.LoadInt32(&w.proto.completeType) == completeTypeComplete {
+		// part upload notifications could arrive out of order
+		sort.Slice(w.completedParts, func(i, j int) bool {
+			return w.completedParts[i].Number < w.completedParts[j].Number
+		})
 		err := w.proto.cfg.Uploader.CompleteUpload(w.proto.cancelCtx, w.proto.cfg.Upload, w.completedParts)
+		w.proto.setCompleteResult(err)
 		if err != nil {
 			log.WithError(err).Warningf("Failed to complete upload.")
 		}
@@ -820,9 +851,10 @@ type ProtoReader struct {
 
 // ProtoReaderStats contains some reader statistics
 type ProtoReaderStats struct {
-	// SkippedDuplicateEvents is a counter with encountered
-	// events recorded several times and skipped
-	SkippedDuplicateEvents int64
+	// SkippedEvents is a counter with encountered
+	// events recorded several times or events
+	// that have been out of order as skipped
+	SkippedEvents int64
 	// OutOfOrderEvents is a counter with events
 	// received out of order
 	OutOfOrderEvents int64
@@ -834,9 +866,9 @@ type ProtoReaderStats struct {
 // ToFields returns a copy of the stats to be used as log fields
 func (p ProtoReaderStats) ToFields() log.Fields {
 	return log.Fields{
-		"skipped-duplicate-events": p.SkippedDuplicateEvents,
-		"out-of-order-events":      p.OutOfOrderEvents,
-		"total-events":             p.TotalEvents,
+		"skipped-events":      p.SkippedEvents,
+		"out-of-order-events": p.OutOfOrderEvents,
+		"total-events":        p.TotalEvents,
 	}
 }
 
@@ -988,7 +1020,7 @@ func (r *ProtoReader) Read(ctx context.Context) (AuditEvent, error) {
 			}
 			r.stats.TotalEvents++
 			if event.GetIndex() <= r.lastIndex {
-				r.stats.SkippedDuplicateEvents++
+				r.stats.SkippedEvents++
 				continue
 			}
 			if r.lastIndex > 0 && event.GetIndex() != r.lastIndex+1 {
@@ -1093,13 +1125,15 @@ func (m *MemoryUploader) CompleteUpload(ctx context.Context, upload StreamUpload
 		return trace.BadParameter("upload already completed")
 	}
 	// verify that all parts have been uploaded
+	var result []byte
 	partsSet := make(map[int64]bool, len(parts))
 	for _, part := range parts {
 		partsSet[part.Number] = true
-		_, ok := up.parts[part.Number]
+		data, ok := up.parts[part.Number]
 		if !ok {
 			return trace.NotFound("part %v has not been uploaded", part.Number)
 		}
+		result = append(result, data...)
 	}
 	// exclude parts that are not requested to be completed
 	for number := range up.parts {
@@ -1107,6 +1141,7 @@ func (m *MemoryUploader) CompleteUpload(ctx context.Context, upload StreamUpload
 			delete(up.parts, number)
 		}
 	}
+	m.objects[upload.SessionID] = result
 	up.completed = true
 	m.trySendEvent(UploadEvent{SessionID: string(upload.SessionID), UploadID: upload.ID})
 	return nil

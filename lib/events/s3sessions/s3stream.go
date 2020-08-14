@@ -73,7 +73,6 @@ func (h *Handler) UploadPart(ctx context.Context, upload events.StreamUpload, pa
 		Body:       partBody,
 		PartNumber: aws.Int64(partNumber),
 	}
-
 	resp, err := h.client.UploadPartWithContext(ctx, params)
 	if err != nil {
 		return nil, ConvertS3Error(err)

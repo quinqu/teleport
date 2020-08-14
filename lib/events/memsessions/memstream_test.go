@@ -1,7 +1,5 @@
-// +build dynamodb
-
 /*
-Copyright 2018 Gravitational, Inc.
+Copyright 2020 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,46 +15,31 @@ limitations under the License.
 
 */
 
-package s3sessions
+package memsessions
 
 import (
-	"fmt"
 	"testing"
 
+	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/events/test"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"gopkg.in/check.v1"
 )
 
-func Test(t *testing.T) { check.TestingT(t) }
+func TestGCS(t *testing.T) { check.TestingT(t) }
 
-type S3Suite struct {
+type MemSuite struct {
 	test.HandlerSuite
 }
 
-var _ = check.Suite(&S3Suite{})
+var _ = check.Suite(&MemSuite{})
 
-func (s *S3Suite) SetUpSuite(c *check.C) {
-	utils.InitLoggerForTests()
-
-	var err error
-	s.HandlerSuite.Handler, err = NewHandler(Config{
-		Region: "us-west-1",
-		Path:   "/test/",
-		Bucket: fmt.Sprintf("teleport-unit-tests"),
-	})
-	c.Assert(err, check.IsNil)
+func (s *MemSuite) SetUpSuite(c *check.C) {
+	utils.InitLoggerForTests(testing.Verbose())
+	s.HandlerSuite.Handler = events.NewMemoryUploader()
 }
 
-func (s *S3Suite) TestUploadDownload(c *check.C) {
-	s.UploadDownload(c)
-}
-
-func (s *S3Suite) TestDownloadNotFound(c *check.C) {
-	s.DownloadNotFound(c)
-}
-
-func (s *S3Suite) TestStream(c *check.C) {
-	s.StreamSinglePart(c)
+func (s *MemSuite) TestStream(c *check.C) {
+	s.StreamManyParts(c)
 }

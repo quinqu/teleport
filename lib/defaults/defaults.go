@@ -252,7 +252,7 @@ const (
 
 	// ConcurrentUploadsPerStream limits the amount of concurrent uploads
 	// per stream
-	ConcurrentUploadsPerStream = 3
+	ConcurrentUploadsPerStream = 1
 
 	// UploadGracePeriod is a period after which non-completed
 	// upload is concidered abandoned and will be completed by the reconciler

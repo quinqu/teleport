@@ -777,7 +777,6 @@ func initUploadHandler(auditConfig services.AuditConfig) (events.MultipartHandle
 		return nil, trace.Wrap(err)
 	}
 
-	// FIXEVENTS: add support for GCS and local as well
 	switch uri.Scheme {
 	case teleport.SchemeGCS:
 		config := gcssessions.Config{}
@@ -788,10 +787,7 @@ func initUploadHandler(auditConfig services.AuditConfig) (events.MultipartHandle
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-		// FIXEVENTS
-		//		return handler, nil
-		panic(handler)
-		return nil, nil
+		return handler, nil
 	case teleport.SchemeS3:
 		config := s3sessions.Config{}
 		if err := config.SetFromURL(uri, auditConfig.Region); err != nil {

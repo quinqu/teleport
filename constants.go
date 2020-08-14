@@ -331,6 +331,9 @@ const (
 	// storage
 	SchemeGCS = "gs"
 
+	// GCSTestURI turns on GCS tests
+	GCSTestURI = "TEST_GCS_URI"
+
 	// Region is AWS region parameter
 	Region = "region"
 
