@@ -94,7 +94,7 @@ func (tc *TeleportClient) Benchmark(ctx context.Context, bench Benchmark) (*Benc
 				// this is to account for coordinated omission,
 				// http://psy-lob-saw.blogspot.com/2015/03/fixing-ycsb-coordinated-omission.html
 				measure := &benchMeasure{
-					Start: time.Now(),
+					ScheduledStart: time.Now(),
 				}
 				select {
 				case requestC <- measure:
@@ -139,7 +139,7 @@ func (tc *TeleportClient) Benchmark(ctx context.Context, bench Benchmark) (*Benc
 					result.LastError = measure.Error
 				}
 				result.RequestsOriginated++
-				result.Histogram.RecordValue(int64(measure.End.Sub(measure.Start) / time.Millisecond))
+				result.Histogram.RecordValue(int64(measure.End.Sub(measure.ScheduledStart) / time.Millisecond))
 			}
 		}
 	}
@@ -147,7 +147,8 @@ func (tc *TeleportClient) Benchmark(ctx context.Context, bench Benchmark) (*Benc
 }
 
 type benchMeasure struct {
-	Start           time.Time
+	ScheduledStart  time.Time
+	ObservedStart   time.Time
 	End             time.Time
 	ThreadCompleted bool
 	ThreadID        int
@@ -165,6 +166,7 @@ type benchmarkThread struct {
 }
 
 func (b *benchmarkThread) execute(measure *benchMeasure) {
+	measure.ObservedStart = time.Now()
 	if !b.interactive {
 		// do not use parent context that will cancel in flight requests
 		// because we give test some time to gracefully wrap up
